@@ -1,13 +1,4 @@
 # Fluentd plugin for VMware Log Insight
-# 
-# Copyright 2018 VMware, Inc. All Rights Reserved. 
-# 
-# This product is licensed to you under the MIT license (the "License").  You may not use this product except in compliance with the MIT License.  
-# 
-# This product may include a number of subcomponents with separate copyright notices and license terms. Your use of these subcomponents is subject to the terms and conditions of the subcomponent's license, as noted in the LICENSE file. 
-# 
-# SPDX-License-Identifier: MIT
-
 
 ---
 apiVersion: v1
@@ -27,7 +18,7 @@ data:
     @include kubernetes.conf
     @include kube-audit.conf
 
-    # Forwading - Be vigilant of the order in which these plugins are specified. Order matters!
+    # Forwarding - Be vigilant of the order in which these plugins are specified. Order matters!
     @include vmw-li.conf
 
   general.conf: |
@@ -86,15 +77,14 @@ data:
     <filter kubernetes.**>
       @type kubernetes_metadata
       @id filter_kube_metadata
-      kubernetes_url "#{ENV['FLUENT_FILTER_KUBERNETES_URL'] || 'https://' + ENV.fetch('KUBERNETES_SERVICE_HOST') + ':' + ENV.                  fetch('KUBERNETES_SERVICE_PORT') + '/api'}"
-      verify_ssl "#{ENV['KUBERNETES_VERIFY_SSL'] || true}"
+      kubernetes_url "#{ENV['FLUENT_FILTER_KUBERNETES_URL'] || 'https://' + ENV.fetch('KUBERNETES_SERVICE_HOST') + ':' + ENV.fetch('KUBERNETES_SERVICE_PORT') + '/api'}"
+      verify_ssl "#{ENV['KUBERNETES_VERIFY_SSL'] || false}"
       ca_file "#{ENV['KUBERNETES_CA_FILE']}"
       skip_labels "#{ENV['FLUENT_KUBERNETES_METADATA_SKIP_LABELS'] || 'false'}"
       skip_container_metadata "#{ENV['FLUENT_KUBERNETES_METADATA_SKIP_CONTAINER_METADATA'] || 'false'}"
       skip_master_url "#{ENV['FLUENT_KUBERNETES_METADATA_SKIP_MASTER_URL'] || 'false'}"
       skip_namespace_metadata "#{ENV['FLUENT_KUBERNETES_METADATA_SKIP_NAMESPACE_METADATA'] || 'false'}"
     </filter>
-
     # Prefix the tag by namespace. This would make it easy to match logs by namespaces
     <match kubernetes.**>
       @type rewrite_tag_filter
@@ -144,7 +134,7 @@ data:
         @type vmware_loginsight
         @id out_vmw_li_all_container_logs
         scheme https
-        ssl_verify true
+        ssl_verify false
         # Loginsight host: One may use IP address or cname
         host 10.0.0.154
         #host vrli-01.homelab.int
@@ -165,7 +155,6 @@ data:
       #  @type stdout
       #</store>
     </match>
-
 
 ---
 kind: DaemonSet
@@ -198,7 +187,7 @@ spec:
     spec:
       containers:
         - name: "log-collector"
-          image: "my-container-hub.com/log-collector:1.0.0"
+          image: "docker.io/ddeswart/fluentd-log-collector:latest"
           command: ["fluentd", "-c", "/fluentd/etc/fluent.conf", "-p", "/fluentd/plugins"]
           resources:
             requests:
