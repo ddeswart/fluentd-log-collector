@@ -35,94 +35,94 @@ data:
     # Journal logs
     <source>
       @type systemd
-      @id in_systemd_logs
+      @id in_systemd_kubelet
       path /var/log/journal
-      pos_file /var/log/fluentd-journald-systemd.pos
+      matches [{ "_SYSTEMD_UNIT": "kubelet.service" }]
+      <storage>
+        @type local
+        persistent true
+        path /var/log/fluentd-journald-kubelet-cursor.pos
+      </storage>
+      <entry>
+        fields_strip_underscores true
+      </entry>
       read_from_head true
-      strip_underscores true
-      tag systemd
+      tag kubelet
     </source>
-    <match systemd>
-      @type rewrite_tag_filter
-      rewriterule1 SYSTEMD_UNIT   ^(.+).service$  systemd.$1
-      rewriterule2 SYSTEMD_UNIT   !^(.+).service$ systemd.unmatched
-    </match>
-    <filter kubelet>
-      type parser
-      format kubernetes
-      reserve_data true
-      key_name MESSAGE
-    </filter>
-    <filter docker>
-      type parser
-      format /^time="(?<time>[^)]*)" level=(?<severity>[^ ]*) msg="(?<message>[^"]*)"( err="(?<error>[^"]*)")?( statusCode=($<status_code>\d+))?/
-      reserve_data true
-      key_name MESSAGE
-      suppress_parse_error_log true
-      ignore_key_not_exist true
-    </filter>
-    # Filter filter ssh logs since it's mostly bots trying to login
-    <filter systemd.**>
-      @type grep
-      exclude1 SYSTEMD_UNIT (sshd@.*\.service)
-    </filter>
+    <source>
+      @type systemd
+      @id in_systemd_docker
+      path /var/log/journal
+      matches [{ "_SYSTEMD_UNIT": "docker.service" }]
+      <storage>
+        @type local
+        persistent true
+        path /var/log/fluentd-journald-docker-cursor.pos
+      </storage>
+      <entry>
+        fields_strip_underscores true
+      </entry>
+      read_from_head true
+      tag docker.systemd
+    </source>
+    <source>
+      @type systemd
+      @id in_systemd_bootkube
+      path /var/log/journal
+      matches [{ "_SYSTEMD_UNIT": "bootkube.service" }]
+      <storage>
+        @type local
+        persistent true
+        path /var/log/fluentd-journald-bootkube-cursor.pos
+      </storage>
+      <entry>
+        fields_strip_underscores true
+      </entry>
+      read_from_head true
+      tag bootkube
+    </source>
 
   kubernetes.conf: |
-    # Capture Kubernetes pod logs
-    # The kubelet creates symlinks that capture the pod name, namespace,
-    # container name & Docker container ID to the docker logs for pods in the
-    # /var/log/containers directory on the host.
+    # Container logs
+    # Kubernetes docker logs are stored under /var/lib/docker/containers for
+    # which kubernetes creates a symlink at /var/log/containers
     <source>
       @type tail
       @id in_tail_container_logs
       path /var/log/containers/*.log
-      pos_file /var/log/fluentd-containers.log.pos
-      time_format %Y-%m-%dT%H:%M:%S.%NZ
-      tag kubernetes.*
-      format json
+      pos_file /var/log/fluentd-docker.pos
       read_from_head true
+      tag kubernetes.*
+      <parse>
+        @type json
+        time_key time
+        keep_time_key true
+        time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </parse>
     </source>
-    # Query the API for extra metadata.
+    # Kubernetes metadata filter that tags additional meta data for each container event
     <filter kubernetes.**>
       @type kubernetes_metadata
       @id filter_kube_metadata
-      # If the logs begin with '{' and end with '}' then it's JSON so merge
-      # the JSON log field into the log event
-      merge_json_log true
-      preserve_json_log true
+      kubernetes_url "#{ENV['FLUENT_FILTER_KUBERNETES_URL'] || 'https://' + ENV.fetch('KUBERNETES_SERVICE_HOST') + ':' + ENV.fetch('KUBERNETES_SERVICE_PORT') + '/api'}"
+      verify_ssl "#{ENV['KUBERNETES_VERIFY_SSL'] || false}"
+      ca_file "#{ENV['KUBERNETES_CA_FILE']}"
+      skip_labels "#{ENV['FLUENT_KUBERNETES_METADATA_SKIP_LABELS'] || 'false'}"
+      skip_container_metadata "#{ENV['FLUENT_KUBERNETES_METADATA_SKIP_CONTAINER_METADATA'] || 'false'}"
+      skip_master_url "#{ENV['FLUENT_KUBERNETES_METADATA_SKIP_MASTER_URL'] || 'false'}"
+      skip_namespace_metadata "#{ENV['FLUENT_KUBERNETES_METADATA_SKIP_NAMESPACE_METADATA'] || 'false'}"
     </filter>
-    # rewrite_tag_filter does not support nested fields like
-    # kubernetes.container_name, so this exists to flatten the fields
-    # so we can use them in our rewrite_tag_filter
-    <filter kubernetes.**>
-      @type record_transformer
-      enable_ruby true
-      remove_keys source
-      <record>
-        kubernetes_namespace_container_name ${record["kubernetes"]["namespace_name"]}.${record["kubernetes"]["container_name"]}
-      </record>
-    </filter>
-    # retag based on the container name of the log message
+    # Prefix the tag by namespace. This would make it easy to match logs by namespaces
     <match kubernetes.**>
       @type rewrite_tag_filter
-      rewriterule1 kubernetes_namespace_container_name  ^(.+)$ kube.$1
+      <rule>
+        key $.kubernetes.namespace_name
+        pattern ^(.+)$
+        tag $1.${tag}
+      </rule>
     </match>
-    # Remove the unnecessary field as the information is already available on
-    # other fields.
-    <filter kube.**>
-      @type record_transformer
-      remove_keys kubernetes_namespace_container_name
-    </filter>
-    <filter kube.kube-system.**>
-      @type parser
-      format kubernetes
-      reserve_data true
-      key_name log
-      suppress_parse_error_log true
-      ignore_key_not_exist true
-    </filter>
 
-  kube-audit.conf: |  
+  kube-audit.conf: |
     # Kube-apiserver audit logs
     <source>
       @type tail
@@ -214,6 +214,7 @@ rules:
   resources:
   - namespaces
   - pods
+  - pods/logs
   verbs: ["get", "list", "watch"]
 
 ---
@@ -267,14 +268,13 @@ spec:
         resources:
           requests:
             memory: 256Mi
-            cpu: 200m
           limits:
             memory: 256Mi
         volumeMounts:
         - name: varlog
           mountPath: /var/log
         - name: varlogjournal
-          mountpath: /var/log/journal
+          mountPath: /var/log/journal
         - name: varlibdockercontainers
           mountPath: /var/lib/docker/containers
           readOnly: true
