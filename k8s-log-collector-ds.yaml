@@ -1,4 +1,10 @@
-# Fluentd DaemonSet for VMware Log Insight (on-prem)
+# Fluentd DaemonSet for VMware Log Insight
+
+####################################################
+# Dimitri de Swart                                 #
+# Cloud Management Specialist @ VMware Netherlands #
+# https://vmguru.com/author/dimitri/               #
+####################################################
 
 ---
 kind: ConfigMap

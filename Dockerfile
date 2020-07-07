@@ -1,11 +1,17 @@
-# Fluentd plugin for VMware Log Insight
+# Fluentd Log Collector for VMware Log Insight
 
-# Sample Dockerfile to use as log collector
+####################################################
+# Dimitri de Swart                                 #
+# Cloud Management Specialist @ VMware Netherlands #
+# https://vmguru.com/author/dimitri/               #
+####################################################
+
+# Dockerfile to use as log collector
 # Builds a debian-based fluentd image that has fluent-plugin-kubernetes_metadata_filter,
 # fluent-plugin-rewrite-tag-filter, fluent-plugin-systemd and
 # fluent-plugin-vmware-loginsight gem installed.
 #
-# This image will get preconfigured with the fluent.conf if avaialble at the
+# This image will get preconfigured with the fluent.conf if available at the
 # same dir level. For fluentd config example, see
 # https://github.com/vmware/fluent-plugin-vmware-loginsight/blob/master/examples/fluent.conf
 
