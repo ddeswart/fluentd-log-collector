@@ -130,7 +130,7 @@ data:
       # path to audit logs for kube-apiserver
       path /var/log/apiserver/audit.log
       pos_file /var/log/audit.pos
-      tag audit
+      tag kube-apiserver-audit
       <parse>
         @type json
         time_key time
@@ -139,28 +139,16 @@ data:
       </parse>
     </source>
     # Loginsight doesn't support ingesting `source` as a field name, get rid of it
-    <filter audit>
+    <filter kube-apiserver-audit>
       @type record_transformer
       @id filter_kube_audit_logs
       enable_ruby
       remove_keys source
       <record>
-        namespace ${record["objectRef"].nil? ? "none":(record["objectRef"]["namespace"].nil? ? "none":record["objectRef"]["namespace"])}
+        log ${record}
       </record>
     </filter>
-    <match audit>
-    # route audit according to namespace element in context
-    @type rewrite_tag_filter
-      <rule>
-        key namespace
-        pattern /^(.+)/
-        tag ${tag}.$1
-      </rule>
-    </match>
-    <filter audit.**>
-      @type record_transformer
-      remove_keys namespace
-    </filter>
+ 
 
   vmw-li.conf: |
     # Match everything
