@@ -1,8 +1,8 @@
-# Fluentd plugin for VMware Log Insight
+# Fluentd DaemonSet for VMware Log Insight (on-prem)
 
 ---
-apiVersion: v1
 kind: ConfigMap
+apiVersion: v1
 metadata:
   name: fluentd-config
   namespace: kube-system
@@ -17,7 +17,6 @@ data:
     @include systemd.conf
     @include kubernetes.conf
     @include kube-audit.conf
-
     # Forwarding - Be vigilant of the order in which these plugins are specified. Order matters!
     @include vmw-li.conf
 
@@ -37,17 +36,20 @@ data:
     <source>
       @type systemd
       @id in_systemd_logs
-      path /run/log/journal
+      tag kubelet
+      path /var/log/journal
       # Can filter logs if we want, e.g.
-      #filters [{ "_SYSTEMD_UNIT": "kubelet.service" }]
+      matches [{ "_SYSTEMD_UNIT": "kubelet.service" }]
+      read_from_head true
       <storage>
         @type local
         persistent true
-        path /var/log/fluentd-systemdlog.pos
+        path /var/log/fluentd-systemdlog-kubelet.pos
       </storage>
-      tag systemdlog
-      read_from_head true
-      strip_underscores true
+      <entry>
+        fields_strip_underscores true
+        fields_lowercase true
+      </entry>
     </source>
 
   kubernetes.conf: |
@@ -58,13 +60,8 @@ data:
       @type tail
       @id in_tail_container_logs
       path /var/log/containers/*.log
-      # One could exclude certain logs like:
-      #exclude_path ["/var/log/containers/log-collector*.log"]
       pos_file /var/log/fluentd-docker.pos
       read_from_head true
-      # Set this watcher to false if you have many files to tail
-      enable_stat_watcher false
-      refresh_interval 5
       tag kubernetes.*
       <parse>
         @type json
@@ -101,26 +98,40 @@ data:
       @type tail
       @id in_tail_kube_audit_logs
       # path to audit logs for kube-apiserver
-      path "/var/log/kube-audit/audit.log"
-      pos_file /var/log/kube-audit.pos
-      tag kube-audit
+      path /var/log/apiserver/audit.log
+      pos_file /var/log/audit.pos
+      tag audit
       <parse>
         @type json
-        time_key timestamp
-        keep_time_key false
-        time_format %Y-%m-%dT%H:%M:%SZ
+        time_key time
+        keep_time_key true
+        time_format %Y-%m-%dT%H:%M:%S.%N%z
       </parse>
     </source>
     # Loginsight doesn't support ingesting `source` as a field name, get rid of it
-    <filter kube-audit>
+    <filter audit>
       @type record_transformer
       @id filter_kube_audit_logs
       enable_ruby
       remove_keys source
       <record>
         log ${record}
+        # namespace ${record["objectRef"].nil? ? "none":(record["objectRef"]["namespace"].nil? ? "none":record["objectRef"]["namespace"])}
       </record>
     </filter>
+    # <match audit>
+    #  route audit according to namespace element in context
+    # @type rewrite_tag_filter
+    #   <rule>
+    #     key namespace
+    #     pattern /^(.+)/
+    #     tag ${tag}.$1
+    #   </rule>
+    # </match>
+    # <filter audit.**>
+    #   @type record_transformer
+    #   remove_keys namespace
+    # </filter>
 
   vmw-li.conf: |
     # Match everything
@@ -157,21 +168,24 @@ data:
     </match>
  
 ---
-apiVersion: v1
 kind: ServiceAccount
+apiVersion: v1
 metadata:
   name: fluentd
   namespace: kube-system
 
 ---
-apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
 metadata:
   name: fluentd
   namespace: kube-system
 rules:
 - apiGroups: [""]
-  resources: ["pods", "deployments", "namespaces", "services"]
+  resources:
+  - namespaces
+  - pods
+  - pods/logs
   verbs: ["get", "list", "watch"]
 
 ---
@@ -190,67 +204,64 @@ subjects:
     
 ---
 kind: DaemonSet
-apiVersion: extensions/v1beta1
+apiVersion: apps/v1
 metadata:
-  name: "log-collector"
-  namespace: "kube-system"
+  name: log-collector
+  namespace: kube-system
   labels:
-    app: "log-collector"
+    k8s-app: log-collector
     version: v1
 spec:
   selector:
     matchLabels:
-      app: "log-collector"
-  revisionHistoryLimit: 3
+      k8s-app: log-collector
+      version: v1
+  template:
+    metadata:
+      labels:
+        k8s-app: log-collector
+        version: v1
   minReadySeconds: 10
   updateStrategy:
     type: RollingUpdate
     rollingUpdate:
-      # How many pods can be unavailable during the rolling update.
-      maxUnavailable: 3
-  template:
-    metadata:
-      annotations:
-        # One may use this annotation to trigger rollout whenever fluentd config changes
-        configHash: GENERATED_HASH
-      labels:
-        app: "log-collector"
-        version: v1
+      maxUnavailable: 1
     spec:
       serviceAccount: fluentd
       serviceAccountName: fluentd
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
       containers:
-        - name: "log-collector"
-          image: "docker.io/ddeswart/fluentd-log-collector:latest"
-          command: ["fluentd", "-c", "/fluentd/etc/fluent.conf", "-p", "/fluentd/plugins"]
-          resources:
-            requests:
-              memory: "512Mi"
-              cpu: "500m"
-            limits:
-              memory: "512Mi"
-              cpu: "500m"
-          volumeMounts:
-            - name: varlog
-              mountPath: /var/log
-            - name: varlibdockercontainers
-              mountPath: /var/lib/docker/containers
-              readOnly: true
-            - name: runlogjournal
-              mountPath: /run/log/journal
-            - name: fluentdconfig
-              mountPath: /fluentd/etc
+      - name: log-collector
+        image: docker.io/ddeswart/fluentd-log-collector:latest
+        command: ["fluentd", "-c", "/fluentd/etc/fluent.conf", "-p", "/fluentd/plugins"]
+        resources:
+          requests:
+            memory: 256Mi
+          limits:
+            memory: 256Mi
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlogjournal
+          mountPath: /var/log/journal
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: fluentdconfig
+          mountPath: /fluentd/etc
       terminationGracePeriodSeconds: 30
       volumes:
-        - name: varlog
-          hostPath:
-            path: /var/log
-        - name: varlibdockercontainers
-          hostPath:
-            path: /var/lib/docker/containers
-        - name: runlogjournal
-          hostPath:
-            path: /run/log/journal
-        - name: fluentdconfig
-          configMap:
-            name: "fluentd-config"
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlogjournal
+        hostPath:
+          path: /var/log/journal
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: fluentdconfig
+        configMap:
+          name: fluentd-config
