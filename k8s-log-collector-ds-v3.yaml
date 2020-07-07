@@ -1,0 +1,296 @@
+# Fluentd DaemonSet for VMware Log Insight (on-prem)
+
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: fluentd-config
+  namespace: kube-system
+data:
+  fluent.conf: |
+    # We can use this config to load some default config or load user defined config
+    @include myapp-fluent.conf
+
+  myapp-fluent.conf: |
+    # Input sources
+    @include general.conf
+    @include systemd.conf
+    @include kubernetes.conf
+    @include kube-audit.conf
+    # Forwarding - Be vigilant of the order in which these plugins are specified. Order matters!
+    @include vmw-li.conf
+
+  general.conf: |
+    <system>
+      log_level info
+    </system>
+    # Prevent fluentd from handling records containing its own logs to handle cycles.
+    <label @FLUENT_LOG>
+      <match fluent.**>
+        @type null
+      </match>
+    </label>
+
+  systemd.conf: |
+    # Journal logs
+    <source>
+      @type systemd
+      @id in_systemd_logs
+      path /var/log/journal
+      pos_file /var/log/fluentd-journald-systemd.pos
+      read_from_head true
+      strip_underscores true
+      tag systemd
+    </source>
+    <match systemd>
+      @type rewrite_tag_filter
+      rewriterule1 SYSTEMD_UNIT   ^(.+).service$  systemd.$1
+      rewriterule2 SYSTEMD_UNIT   !^(.+).service$ systemd.unmatched
+    </match>
+    <filter kubelet>
+      type parser
+      format kubernetes
+      reserve_data true
+      key_name MESSAGE
+    </filter>
+    <filter docker>
+      type parser
+      format /^time="(?<time>[^)]*)" level=(?<severity>[^ ]*) msg="(?<message>[^"]*)"( err="(?<error>[^"]*)")?( statusCode=($<status_code>\d+))?/
+      reserve_data true
+      key_name MESSAGE
+      suppress_parse_error_log true
+      ignore_key_not_exist true
+    </filter>
+    # Filter filter ssh logs since it's mostly bots trying to login
+    <filter systemd.**>
+      @type grep
+      exclude1 SYSTEMD_UNIT (sshd@.*\.service)
+    </filter>
+
+  kubernetes.conf: |
+    # Capture Kubernetes pod logs
+    # The kubelet creates symlinks that capture the pod name, namespace,
+    # container name & Docker container ID to the docker logs for pods in the
+    # /var/log/containers directory on the host.
+    <source>
+      @type tail
+      @id in_tail_container_logs
+      path /var/log/containers/*.log
+      pos_file /var/log/fluentd-containers.log.pos
+      time_format %Y-%m-%dT%H:%M:%S.%NZ
+      tag kubernetes.*
+      format json
+      read_from_head true
+    </source>
+    # Query the API for extra metadata.
+    <filter kubernetes.**>
+      @type kubernetes_metadata
+      @id filter_kube_metadata
+      # If the logs begin with '{' and end with '}' then it's JSON so merge
+      # the JSON log field into the log event
+      merge_json_log true
+      preserve_json_log true
+    </filter>
+    # rewrite_tag_filter does not support nested fields like
+    # kubernetes.container_name, so this exists to flatten the fields
+    # so we can use them in our rewrite_tag_filter
+    <filter kubernetes.**>
+      @type record_transformer
+      enable_ruby true
+      remove_keys source
+      <record>
+        kubernetes_namespace_container_name ${record["kubernetes"]["namespace_name"]}.${record["kubernetes"]["container_name"]}
+      </record>
+    </filter>
+    # retag based on the container name of the log message
+    <match kubernetes.**>
+      @type rewrite_tag_filter
+      rewriterule1 kubernetes_namespace_container_name  ^(.+)$ kube.$1
+    </match>
+    # Remove the unnecessary field as the information is already available on
+    # other fields.
+    <filter kube.**>
+      @type record_transformer
+      remove_keys kubernetes_namespace_container_name
+    </filter>
+    <filter kube.kube-system.**>
+      @type parser
+      format kubernetes
+      reserve_data true
+      key_name log
+      suppress_parse_error_log true
+      ignore_key_not_exist true
+    </filter>
+
+  kube-audit.conf: |  
+    # Kube-apiserver audit logs
+    <source>
+      @type tail
+      @id in_tail_kube_audit_logs
+      # path to audit logs for kube-apiserver
+      path /var/log/apiserver/audit.log
+      pos_file /var/log/audit.pos
+      tag audit
+      <parse>
+        @type json
+        time_key time
+        keep_time_key true
+        time_format %Y-%m-%dT%H:%M:%S.%N%z
+      </parse>
+    </source>
+    # Loginsight doesn't support ingesting `source` as a field name, get rid of it
+    <filter audit>
+      @type record_transformer
+      @id filter_kube_audit_logs
+      enable_ruby
+      remove_keys source
+      <record>
+        namespace ${record["objectRef"].nil? ? "none":(record["objectRef"]["namespace"].nil? ? "none":record["objectRef"]["namespace"])}
+      </record>
+    </filter>
+    <match audit>
+    # route audit according to namespace element in context
+    @type rewrite_tag_filter
+      <rule>
+        key namespace
+        pattern /^(.+)/
+        tag ${tag}.$1
+      </rule>
+    </match>
+    <filter audit.**>
+      @type record_transformer
+      remove_keys namespace
+    </filter>
+
+  vmw-li.conf: |
+    # Match everything
+    # We are capturing all log messages and redirecting them to endpoints mentioned in each <store> tag.
+    # One may redirect these logs to muliple endpoints (including multiple LI instances).
+    # Or one may chose to tag their specific logs and add their own config to capture those tagged logs and redirect
+    # them to appropriate endpoint. That specific config needs to preceed this generic one.
+    <match **>
+      @type copy
+      <store>
+        @type vmware_loginsight
+        @id out_vmw_li_all_container_logs
+        scheme https
+        ssl_verify false
+        # Loginsight host: One may use IP address or cname
+        host 10.0.0.154
+        #host vrli-01.homelab.int
+        port 9543
+        agent_id XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
+        # Keys from log event whose values should be added as log message/text to
+        # Loginsight. Note these key/value pairs  won't be added as metadata/fields
+        log_text_keys ["log","msg","message"]
+        # Use this flag if you want to enable http debug logs
+        http_conn_debug false
+      </store>
+      # copy plugin supports sending/copying logs to multiple plugins
+      # One may choose to send them to multiple LIs
+      # Or one may want send a copy to stdout for debugging
+      # Please note, if you use stdout along with LI, catch the logger's log to make
+      # sure they're not cyclic
+      #<store>
+      #  @type stdout
+      #</store>
+    </match>
+ 
+---
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: fluentd
+  namespace: kube-system
+
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: fluentd
+  namespace: kube-system
+rules:
+- apiGroups: [""]
+  resources:
+  - namespaces
+  - pods
+  verbs: ["get", "list", "watch"]
+
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: fluentd
+roleRef:
+  kind: ClusterRole
+  name: fluentd
+  apiGroup: rbac.authorization.k8s.io
+subjects:
+- kind: ServiceAccount
+  name: fluentd
+  namespace: kube-system    
+    
+---
+kind: DaemonSet
+apiVersion: apps/v1
+metadata:
+  name: log-collector
+  namespace: kube-system
+  labels:
+    k8s-app: log-collector
+    version: v1
+spec:
+  minReadySeconds: 10
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      k8s-app: log-collector
+      version: v1
+  template:
+    metadata:
+      labels:
+        k8s-app: log-collector
+        version: v1
+    spec:
+      serviceAccount: fluentd
+      serviceAccountName: fluentd
+      tolerations:
+      - key: node-role.kubernetes.io/master
+        effect: NoSchedule
+      containers:
+      - name: log-collector
+        image: docker.io/ddeswart/fluentd-log-collector:latest
+        command: ["fluentd", "-c", "/fluentd/etc/fluent.conf", "-p", "/fluentd/plugins"]
+        resources:
+          requests:
+            memory: 256Mi
+            cpu: 200m
+          limits:
+            memory: 256Mi
+        volumeMounts:
+        - name: varlog
+          mountPath: /var/log
+        - name: varlogjournal
+          mountpath: /var/log/journal
+        - name: varlibdockercontainers
+          mountPath: /var/lib/docker/containers
+          readOnly: true
+        - name: fluentdconfig
+          mountPath: /fluentd/etc
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: varlog
+        hostPath:
+          path: /var/log
+      - name: varlogjournal
+        hostPath:
+          path: /var/log/journal
+      - name: varlibdockercontainers
+        hostPath:
+          path: /var/lib/docker/containers
+      - name: fluentdconfig
+        configMap:
+          name: fluentd-config
