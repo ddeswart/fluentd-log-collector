@@ -153,8 +153,8 @@ data:
         scheme https
         ssl_verify false
         # Loginsight host: One may use IP address or cname
-        host 10.0.0.154
-        #host vrli-01.homelab.int
+        host <YOUR_LOG-INSIGHT-SERVER_IP>
+        #host <YOUR_LOG-INSIGHT-SERVER_FQDN>
         port 9543
         agent_id XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
         # Keys from log event whose values should be added as log message/text to
