@@ -7,14 +7,13 @@
 ####################################################
 
 ---
-kind: ConfigMap
 apiVersion: v1
+kind: ConfigMap
 metadata:
   name: fluentd-config
   namespace: kube-system
 data:
   fluent.conf: |
-    # We can use this config to load some default config or load user defined config
     @include myapp-fluent.conf
 
   myapp-fluent.conf: |
@@ -23,14 +22,13 @@ data:
     @include systemd.conf
     @include kubernetes.conf
     @include kube-audit.conf
-    # Forwarding - Be vigilant of the order in which these plugins are specified. Order matters!
     @include vmw-li.conf
 
   general.conf: |
     <system>
       log_level info
     </system>
-    # Prevent fluentd from handling records containing its own logs to handle cycles.
+    # Prevent fluentd from handling records containing its own logs to handle cycles
     <label @FLUENT_LOG>
       <match fluent.**>
         @type null
@@ -44,7 +42,6 @@ data:
       @id in_systemd_logs
       tag kubelet
       path /var/log/journal
-      # Can filter logs if we want, e.g.
       matches [{ "_SYSTEMD_UNIT": "kubelet.service" }]
       read_from_head true
       <storage>
@@ -68,6 +65,9 @@ data:
       path /var/log/containers/*.log
       pos_file /var/log/fluentd-docker.pos
       read_from_head true
+      # Set this watcher to false if you have many files to tail
+      enable_stat_watcher false
+      refresh_interval 5
       tag kubernetes.*
       <parse>
         @type json
@@ -103,13 +103,12 @@ data:
     <source>
       @type tail
       @id in_tail_kube_audit_logs
-      # path to audit logs for kube-apiserver
       path /var/log/apiserver/audit.log
       pos_file /var/log/audit.pos
       tag audit
       <parse>
         @type json
-        time_key time
+        time_key timestamp
         keep_time_key true
         time_format %Y-%m-%dT%H:%M:%S.%N%z
       </parse>
@@ -122,29 +121,15 @@ data:
       remove_keys source
       <record>
         log ${record}
-        # namespace ${record["objectRef"].nil? ? "none":(record["objectRef"]["namespace"].nil? ? "none":record["objectRef"]["namespace"])}
       </record>
     </filter>
-    # <match audit>
-    #  route audit according to namespace element in context
-    # @type rewrite_tag_filter
-    #   <rule>
-    #     key namespace
-    #     pattern /^(.+)/
-    #     tag ${tag}.$1
-    #   </rule>
-    # </match>
-    # <filter audit.**>
-    #   @type record_transformer
-    #   remove_keys namespace
-    # </filter>
 
   vmw-li.conf: |
     # Match everything
-    # We are capturing all log messages and redirecting them to endpoints mentioned in each <store> tag.
-    # One may redirect these logs to muliple endpoints (including multiple LI instances).
+    # We are capturing all log messages and redirecting them to endpoints mentioned in each <store> tag
+    # One may redirect these logs to muliple endpoints (including multiple LI instances)
     # Or one may chose to tag their specific logs and add their own config to capture those tagged logs and redirect
-    # them to appropriate endpoint. That specific config needs to preceed this generic one.
+    # them to appropriate endpoint. That specific config needs to preceed this generic one
     <match **>
       @type copy
       <store>
@@ -153,8 +138,8 @@ data:
         scheme https
         ssl_verify false
         # Loginsight host: One may use IP address or cname
-        host <YOUR_LOG-INSIGHT-SERVER_IP>
-        #host <YOUR_LOG-INSIGHT-SERVER_FQDN>
+        host X.X.X.X
+        #host MY_LOGINSIGHT_HOST_FQDN
         port 9543
         agent_id XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
         # Keys from log event whose values should be added as log message/text to
@@ -172,7 +157,7 @@ data:
       #  @type stdout
       #</store>
     </match>
- 
+
 ---
 kind: ServiceAccount
 apiVersion: v1
@@ -187,12 +172,16 @@ metadata:
   name: fluentd
   namespace: kube-system
 rules:
-- apiGroups: [""]
+- apiGroups:
+    - ""
   resources:
-  - namespaces
-  - pods
-  - pods/logs
-  verbs: ["get", "list", "watch"]
+    - "namespaces"
+    - "pods"
+    - "pods/logs"
+  verbs: 
+    - "list"
+    - "get"
+    - "watch"
 
 ---
 kind: ClusterRoleBinding
@@ -206,8 +195,8 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: fluentd
-  namespace: kube-system    
-    
+  namespace: kube-system
+
 ---
 kind: DaemonSet
 apiVersion: apps/v1
@@ -215,23 +204,18 @@ metadata:
   name: log-collector
   namespace: kube-system
   labels:
-    k8s-app: log-collector
+    app: log-collector
     version: v1
 spec:
   selector:
     matchLabels:
-      k8s-app: log-collector
-      version: v1
+      app: log-collector
+  minReadySeconds: 10
   template:
     metadata:
       labels:
-        k8s-app: log-collector
+        app: log-collector
         version: v1
-  minReadySeconds: 10
-  updateStrategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxUnavailable: 1
     spec:
       serviceAccount: fluentd
       serviceAccountName: fluentd
@@ -239,35 +223,41 @@ spec:
       - key: node-role.kubernetes.io/master
         effect: NoSchedule
       containers:
-      - name: log-collector
-        image: docker.io/ddeswart/fluentd-log-collector:latest
-        command: ["fluentd", "-c", "/fluentd/etc/fluent.conf", "-p", "/fluentd/plugins"]
-        resources:
-          requests:
-            memory: 256Mi
-          limits:
-            memory: 256Mi
-        volumeMounts:
-        - name: varlog
-          mountPath: /var/log
-        - name: varlogjournal
-          mountPath: /var/log/journal
-        - name: varlibdockercontainers
-          mountPath: /var/lib/docker/containers
-          readOnly: true
-        - name: fluentdconfig
-          mountPath: /fluentd/etc
+        - name: log-collector
+          image: docker.io/ddeswart/fluentd-log-collector:latest
+          command: ["fluentd", "-c", "/fluentd/etc/fluent.conf", "-p", "/fluentd/plugins"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 200Mi
+            limits:
+              memory: 500Mi
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+            - name: varlogjournal
+              mountPath: /var/log/journal
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: fluentdconfig
+              mountPath: /fluentd/etc
       terminationGracePeriodSeconds: 30
       volumes:
-      - name: varlog
-        hostPath:
-          path: /var/log
-      - name: varlogjournal
-        hostPath:
-          path: /var/log/journal
-      - name: varlibdockercontainers
-        hostPath:
-          path: /var/lib/docker/containers
-      - name: fluentdconfig
-        configMap:
-          name: fluentd-config
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: varlogjournal
+          hostPath:
+            path: /var/log/journal
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+        - name: fluentdconfig
+          configMap:
+            name: fluentd-config
